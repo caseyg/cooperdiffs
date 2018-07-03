@@ -4,13 +4,13 @@ import re
 from django.shortcuts import render_to_response, get_object_or_404, redirect
 from models import Article, Version
 import models
-import simplejson
+import json
 from django.http import HttpResponse, HttpResponseRedirect, Http404
 from django.core.urlresolvers import reverse
 import urllib
 import django.db
 import time
-from django.template import Context, loader
+from django.template import Context, RequestContext, loader
 from django.views.decorators.cache import cache_page
 
 OUT_FORMAT = '%B %d, %Y at %l:%M%P EDT'
@@ -38,6 +38,15 @@ def get_first_update(source):
         source = ''
     updates = models.Article.objects.order_by('last_update').filter(last_update__gt=datetime.datetime(1990, 1, 1, 0, 0),
                                                                     url__contains=source)
+    try:
+        return updates[0].last_update
+    except IndexError:
+        return datetime.datetime.now()
+
+def get_last_update(source):
+    if source is None:
+        source = ''
+    updates = models.Article.objects.order_by('-last_update').filter(last_update__gt=datetime.datetime(1990, 1, 1, 0, 0), url__contains=source)
     try:
         return updates[0].last_update
     except IndexError:
@@ -95,11 +104,45 @@ def get_articles(source=None, distance=0):
     return articles
 
 
-SOURCES = 'nytimes.com cnn.com politico.com bbc.co.uk'.split() + ['']
+SOURCES = '''nytimes.com cnn.com politico.com washingtonpost.com
+bbc.co.uk'''.split()
+
+def is_valid_domain(domain):
+    """Cheap method to tell whether a domain is being tracked."""
+    return any(domain.endswith(source) for source in SOURCES)
 
 @cache_page(60 * 30)  #30 minute cache
 def browse(request, source=''):
-    if source not in SOURCES:
+    if source not in SOURCES + ['']:
+        raise Http404
+    pagestr=request.REQUEST.get('page', '1')
+    try:
+        page = int(pagestr)
+    except ValueError:
+        page = 1
+
+    # Temporarily disable browsing past the first page, since it was
+    # overloading the server.
+    if page != 1:
+        return HttpResponseRedirect(reverse(browse))
+
+    first_update = get_first_update(source)
+    num_pages = (datetime.datetime.now() - first_update).days + 1
+    page_list=range(1, 1+num_pages)
+    page_list = []
+
+    articles = get_articles(source=source, distance=page-1)
+    return render_to_response('browse.html', {
+            'source': source, 'articles': articles,
+            'page':page,
+            'page_list': page_list,
+            'first_update': first_update,
+            'sources': SOURCES
+            })
+
+@cache_page(60 * 30)  #30 minute cache
+def feed(request, source=''):
+    if source not in SOURCES + ['']:
         raise Http404
     pagestr=request.REQUEST.get('page', '1')
     try:
@@ -108,18 +151,21 @@ def browse(request, source=''):
         page = 1
 
     first_update = get_first_update(source)
+    last_update = get_last_update(source)
     num_pages = (datetime.datetime.now() - first_update).days + 1
     page_list=range(1, 1+num_pages)
 
     articles = get_articles(source=source, distance=page-1)
-    return render_to_response('browse.html', {
+    return render_to_response('feed.xml', {
             'source': source, 'articles': articles,
             'page':page,
+            'request':request,
             'page_list': page_list,
-            'first_update': first_update,
-            'sources': SOURCES[:-1]
-            })
-
+            'last_update': last_update,
+            'sources': SOURCES
+            },
+            context_instance=RequestContext(request),
+            mimetype='application/atom+xml')
 
 def old_diffview(request):
     """Support for legacy diff urls"""
@@ -223,22 +269,64 @@ def get_rowinfo(article, version_lst=None):
     rowinfo.reverse()
     return rowinfo
 
+
+def prepend_http(url):
+    """Return a version of the url that starts with the proper scheme.
+
+    url may look like
+
+    www.nytimes.com
+    https:/www.nytimes.com    <- because double slashes get stripped
+    http://www.nytimes.com
+    """
+    components = url.split('/', 2)
+    if len(components) <= 2 or '.' in components[0]:
+        components = ['http:', '']+components
+    elif components[1]:
+        components[1:1] = ['']
+    return '/'.join(components)
+
+def swap_http_https(url):
+    """Get the url with the other of http/https to start"""
+    for (one, other) in [("https:", "http:"),
+                         ("http:", "https:")]:
+        if url.startswith(one):
+            return other+url[len(one):]
+    raise ValueError("URL doesn't start with http or https")
+
 def article_history(request, urlarg=''):
-    url = request.REQUEST.get('url')
+    url = request.REQUEST.get('url') # this is the deprecated interface.
     if url is None:
         url = urlarg
     if len(url) == 0:
         return HttpResponseRedirect(reverse(front))
 
-    url = url.split('?')[0]
+    url = url.split('?')[0]  #For if user copy-pastes from news site
 
-    if '//' not in url:
-        url = 'http://' + url
+    url = prepend_http(url)
+
+    # This is a hack to deal with unicode passed in the URL.
+    # Otherwise gives an error, since our table character set is latin1.
+    url = url.encode('ascii', 'ignore')
+
+    # Give an error on urls with the wrong hostname without hitting the
+    # database.  These queries are usually spam.
+    domain = url.split('/')[2]
+    if not is_valid_domain(domain):
+        return render_to_response('article_history_missing.html', {'url': url})
+
 
     try:
-        article = Article.objects.get(url=url)
+        try:
+            article = Article.objects.get(url=url)
+        except Article.DoesNotExist:
+            article = Article.objects.get(url=swap_http_https(url))
     except Article.DoesNotExist:
-        return render_to_response('article_history_missing.html', {'url': url})
+        try:
+            return render_to_response('article_history_missing.html', {'url': url})
+        except (TypeError, ValueError):
+            # bug in django + mod_rewrite can cause this. =/
+            return HttpResponse('Bug!')
 
     if len(urlarg) == 0:
         return HttpResponseRedirect(reverse(article_history, args=[article.filename()]))
@@ -248,6 +336,27 @@ def article_history(request, urlarg=''):
                                                        'versions':rowinfo,
             'display_search_banner': came_from_search_engine(request),
                                                        })
+def article_history_feed(request, url=''):
+    url = prepend_http(url)
+    article = get_object_or_404(Article, url=url)
+    rowinfo = get_rowinfo(article)
+    return render_to_response('article_history.xml',
+                              { 'article': article,
+                                'versions': rowinfo,
+                                'request': request,
+                                },
+                              context_instance=RequestContext(request),
+                              mimetype='application/atom+xml')
+
+def json_view(request, vid):
+    version = get_object_or_404(Version, id=int(vid))
+    data = dict(
+        title=version.title,
+        byline = version.byline,
+        date = version.date.isoformat(),
+        text = version.text(),
+        )
+    return HttpResponse(json.dumps(data), mimetype="application/json")
 
 def upvote(request):
     article_url = request.REQUEST.get('article_url')
@@ -268,7 +377,7 @@ def contact(request):
     return render_to_response('contact.html', {})
 
 def front(request):
-    return render_to_response('front.html', {})
+    return render_to_response('front.html', {'sources': SOURCES})
 
 def subscribe(request):
     return render_to_response('subscribe.html', {})

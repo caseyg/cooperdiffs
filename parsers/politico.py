@@ -6,19 +6,19 @@ from baseparser import BaseParser, grab_url, logger
 from BeautifulSoup import BeautifulSoup
 # This is BeautifulSoup 4
 import bs4
-
+import re
 
 class PoliticoParser(BaseParser):
     domains = ['www.politico.com']
 
-    feeder_base = 'http://www.politico.com/'
-    feeder_pat  = '^http://www.politico.com/(news/stories|story)/'
+    feeder_pat   = '^http://www.politico.com/(news/stories|story)/'
+    feeder_pages = ['http://www.politico.com/']
 
     feeder_bs = bs4.BeautifulSoup
 
     def _parse(self, html):
         soup = bs4.BeautifulSoup(html)
-        print_link = soup.findAll('a', text='Print')[0].get('href')
+        print_link = soup.findAll('a', href=re.compile('http://dyn.politico.com/printstory.cfm.*'))[0].get('href')
         html2 = grab_url(print_link)
         logger.debug('got html 2')
         # Now we have to switch back to bs3.  Hilarious.

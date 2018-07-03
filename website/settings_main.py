@@ -1,4 +1,7 @@
-# Django settings for newsdiffer project.
+# Django settings for the newsdiffs project.
+
+ALLOWED_HOSTS = ['.newsdiffs.org', '.newsdiffs.org.',
+                 'newsdiffs.scripts.mit.edu', 'localhost', '127.0.0.1']
 
 DEBUG = False
 TEMPLATE_DEBUG = DEBUG
@@ -10,17 +13,17 @@ ADMINS = (
 )
 
 MANAGERS = ADMINS
+SERVER_EMAIL = "newsdiffs@mit.edu"
 
-
-for line in open('/mit/ecprice/.my.cnf').read().split():
+for line in open('/mit/newsdiffs/.my.cnf').read().split():
     if line.startswith('password='):
         pwd = line.split('=')[1]
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.mysql',
         'HOST': 'sql.mit.edu',
-        'NAME': 'ecprice+newsdiffs',
-        'USER': 'ecprice',
+        'NAME': 'newsdiffs+newsdiffs',
+        'USER': 'newsdiffs',
         'PASSWORD': pwd,
         'OPTIONS': {
 # This doesn't seem to work.
